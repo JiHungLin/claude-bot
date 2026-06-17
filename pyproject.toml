@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claudebot"
+version = "0.1.0"
+description = "LINE <-> Claude Code CLI 橋接服務"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "line-bot-sdk>=3.20",
+    "pydantic-settings>=2.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claudebot"]

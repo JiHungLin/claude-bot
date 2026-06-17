@@ -1,0 +1,248 @@
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+
+from fastapi import FastAPI, HTTPException, Request
+from linebot.v3.exceptions import InvalidSignatureError
+from linebot.v3.webhook import WebhookParser
+from linebot.v3.webhooks import GroupSource, MessageEvent, TextMessageContent, UserSource
+
+from claudebot.allowlist import add_user, is_allowed
+from claudebot.claude_invoker import ALLOWED_TOOLS_GROUP, ALLOWED_TOOLS_READONLY, ClaudeInvoker
+from claudebot.config import settings
+from claudebot.line_client import LineClient
+from claudebot.session_store import SessionStore
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    handlers=[logging.FileHandler(settings.log_path), logging.StreamHandler()],
+    force=True,
+)
+logger = logging.getLogger("claudebot.server")
+
+parser = WebhookParser(settings.line_channel_secret)
+line_client = LineClient(settings.line_channel_access_token)
+session_store = SessionStore(settings.session_store_path)
+invoker = ClaudeInvoker(
+    binary=settings.claude_binary,
+    workspace_dir=settings.workspace_dir,
+    timeout_seconds=settings.claude_timeout_seconds,
+    max_budget_usd=settings.claude_max_budget_usd,
+)
+
+_user_locks: dict[str, asyncio.Lock] = {}
+_claude_semaphore = asyncio.Semaphore(settings.claude_max_concurrent)
+
+app = FastAPI()
+
+
+def _lock_for(user_id: str) -> asyncio.Lock:
+    return _user_locks.setdefault(user_id, asyncio.Lock())
+
+
+# ── LINE webhook ──────────────────────────────────────────────────────────────
+
+@app.post("/webhook")
+async def webhook(request: Request) -> dict:
+    signature = request.headers.get("X-Line-Signature", "")
+    body = (await request.body()).decode("utf-8")
+
+    try:
+        events = parser.parse(body, signature)
+    except InvalidSignatureError:
+        raise HTTPException(status_code=400, detail="invalid signature")
+
+    for event in events:
+        logger.info("event type=%s source=%s", type(event).__name__, type(event.source).__name__)
+        if not isinstance(event, MessageEvent) or not isinstance(event.message, TextMessageContent):
+            continue
+
+        source = event.source
+        text = event.message.text
+        reply_token = event.reply_token
+
+        if isinstance(source, GroupSource):
+            _handle_group_event(source, text, reply_token)
+        elif isinstance(source, UserSource):
+            _handle_user_event(source, text, reply_token)
+
+    return {"status": "ok"}
+
+
+def _handle_group_event(source: GroupSource, text: str, reply_token: str) -> None:
+    if settings.line_group_id is None or source.group_id != settings.line_group_id:
+        logger.info("[GROUP_DISCOVERED] group_id=%s", source.group_id)
+        return
+    if not text.startswith(settings.bot_command_prefix):
+        return
+
+    user_id = source.user_id
+    command_text = text[len(settings.bot_command_prefix):].strip()
+    if not command_text:
+        line_client.reply(reply_token, "請在 !bot 後面輸入問題，例如：!bot 目前有哪些 PR？")
+        return
+    if command_text.startswith("/"):
+        line_client.reply(reply_token, "不支援 slash command，請直接輸入問題。")
+        return
+    if len(command_text) > settings.max_message_length:
+        line_client.reply(reply_token, f"訊息過長（上限 {settings.max_message_length} 字），請精簡後再試。")
+        return
+    line_client.reply(reply_token, "處理中...")
+    session_key = f"{source.group_id}:{user_id}"
+    asyncio.create_task(_process_message(
+        user_id, command_text,
+        push_target=source.group_id,
+        session_key=session_key,
+        reply_token="",
+        append_system_prompt=settings.group_system_prompt,
+        allowed_tools=ALLOWED_TOOLS_GROUP,
+    ))
+
+
+def _handle_user_event(source: UserSource, text: str, reply_token: str) -> None:
+    user_id = source.user_id
+    if not is_allowed(user_id, settings.allowlist_path):
+        if settings.invite_key and text.strip() == settings.invite_key:
+            add_user(user_id, settings.allowlist_path)
+            display_name = line_client.get_display_name(user_id)
+            logger.info("[INVITE_ACCEPTED] user_id=%s display_name=%r", user_id, display_name)
+            line_client.reply(reply_token, "✅ 已加入白名單，歡迎使用！直接傳訊息就能開始互動。")
+        else:
+            display_name = line_client.get_display_name(user_id)
+            logger.warning(
+                "[UNAUTHORIZED] user_id=%s display_name=%r message=%r",
+                user_id, display_name, text,
+            )
+        return
+
+    if text.startswith("/"):
+        line_client.reply(reply_token, "不支援 slash command，請直接輸入問題。")
+        return
+    if len(text) > settings.max_message_length:
+        line_client.reply(reply_token, f"訊息過長（上限 {settings.max_message_length} 字），請精簡後再試。")
+        return
+
+    line_client.show_loading_animation(user_id)
+    asyncio.create_task(_process_message(
+        user_id, text, push_target=user_id, session_key=user_id, reply_token=reply_token,
+        append_system_prompt=settings.user_system_prompt,
+    ))
+
+
+# ── GitHub webhook ────────────────────────────────────────────────────────────
+
+@app.post("/github-webhook")
+async def github_webhook(request: Request) -> dict:
+    if not settings.github_webhook_secret:
+        raise HTTPException(status_code=501, detail="GitHub webhook not configured")
+
+    body_bytes = await request.body()
+    sig_header = request.headers.get("X-Hub-Signature-256", "")
+    expected = "sha256=" + hmac.new(
+        settings.github_webhook_secret.encode(),
+        body_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(sig_header, expected):
+        raise HTTPException(status_code=400, detail="invalid signature")
+
+    if request.headers.get("X-GitHub-Event", "") != "issues":
+        return {"status": "ignored"}
+
+    payload = json.loads(body_bytes.decode("utf-8"))
+    action = payload.get("action", "")
+    if action not in ("opened", "closed"):
+        return {"status": "ignored"}
+
+    asyncio.create_task(_handle_github_issue(payload, action))
+    return {"status": "ok"}
+
+
+# ── async workers ─────────────────────────────────────────────────────────────
+
+async def _heartbeat(push_target: str) -> None:
+    await asyncio.sleep(settings.claude_heartbeat_seconds)
+    line_client.push(push_target, "⏳ 還在處理中，請耐心等候...")
+
+
+async def _process_message(
+    user_id: str,
+    text: str,
+    *,
+    push_target: str,
+    session_key: str,
+    reply_token: str,
+    append_system_prompt: str | None = None,
+    allowed_tools: str | None = None,
+) -> None:
+    async with _lock_for(session_key):
+        try:
+            await asyncio.wait_for(_claude_semaphore.acquire(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("semaphore timeout session_key=%s", session_key)
+            line_client.push(push_target, "⚠️ 系統目前忙碌，請稍後再試。")
+            return
+
+        heartbeat = asyncio.create_task(_heartbeat(push_target))
+        try:
+            existing_session_id = session_store.get(session_key)
+            result = await invoker.run(
+                text, existing_session_id,
+                base_system_prompt=settings.base_system_prompt,
+                append_system_prompt=append_system_prompt,
+                allowed_tools=allowed_tools,
+            )
+        except TimeoutError:
+            logger.exception("claude timed out session_key=%s", session_key)
+            line_client.push(push_target, "處理逾時，請稍後再試。")
+            return
+        except Exception:
+            logger.exception("claude failed session_key=%s", session_key)
+            line_client.push(push_target, "處理失敗，請稍後再試。")
+            return
+        finally:
+            heartbeat.cancel()
+            _claude_semaphore.release()
+
+        session_store.set(session_key, result.session_id)
+        line_client.reply_or_push(reply_token, push_target, result.text or "(無回應內容)")
+
+
+async def _handle_github_issue(payload: dict, action: str) -> None:
+    if not settings.line_group_id:
+        logger.warning("LINE_GROUP_ID not configured, skipping GitHub issue notification")
+        return
+
+    issue = payload.get("issue", {})
+    repo = payload.get("repository", {})
+    action_zh = "建立" if action == "opened" else "已關閉"
+
+    prompt = (
+        f"請把以下 GitHub issue 資訊整理成一段簡短的中文 LINE 群組公告（不超過 200 字）。"
+        f"要包含：事件（{action_zh}）、issue 標題、連結、以及 body 的重點摘要（若有）。\n\n"
+        f"Repo: {repo.get('full_name', '')}\n"
+        f"Issue #{issue.get('number', '')}: {issue.get('title', '')}\n"
+        f"作者: {issue.get('user', {}).get('login', '')}\n"
+        f"狀態: {action_zh}\n"
+        f"URL: {issue.get('html_url', '')}\n"
+        f"Body:\n{(issue.get('body') or '（無說明）')[:1000]}"
+    )
+
+    try:
+        result = await invoker.run(
+            prompt, existing_session_id=None,
+            persist_session=False,
+            base_system_prompt=settings.base_system_prompt,
+        )
+        line_client.push(settings.line_group_id, result.text or "(無法生成公告)")
+    except Exception:
+        logger.exception("failed to handle github issue event")
+        fallback = (
+            f"[GitHub] Issue #{issue.get('number')} {action_zh}\n"
+            f"{issue.get('html_url', '')}"
+        )
+        line_client.push(settings.line_group_id, fallback)
