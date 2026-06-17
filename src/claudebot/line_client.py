@@ -36,36 +36,42 @@ class LineClient:
         except Exception:
             logger.debug("show_loading_animation failed chat_id=%s", chat_id)
 
-    def reply(self, reply_token: str, text: str) -> None:
+    def reply(self, reply_token: str, text: str, quote_token: str | None = None) -> None:
+        msg = TextMessage(text=text)
+        if quote_token:
+            msg.quote_token = quote_token
         with ApiClient(self._configuration) as api_client:
             MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(reply_token=reply_token, messages=[TextMessage(text=text)])
+                ReplyMessageRequest(reply_token=reply_token, messages=[msg])
             )
 
-    def reply_or_push(self, reply_token: str, push_target: str, text: str) -> None:
+    def reply_or_push(self, reply_token: str, push_target: str, text: str, quote_token: str | None = None) -> None:
         """Try reply_token first (free); fall back to push if token expired or absent."""
         if not reply_token:
-            self.push(push_target, text)
+            self.push(push_target, text, quote_token=quote_token)
             return
         chunks = _split_text(text)
         try:
             with ApiClient(self._configuration) as api_client:
+                messages = [TextMessage(text=c) for c in chunks[:LINE_MAX_MESSAGES_PER_CALL]]
+                if quote_token:
+                    messages[0].quote_token = quote_token
                 MessagingApi(api_client).reply_message(
-                    ReplyMessageRequest(
-                        reply_token=reply_token,
-                        messages=[TextMessage(text=c) for c in chunks[:LINE_MAX_MESSAGES_PER_CALL]],
-                    )
+                    ReplyMessageRequest(reply_token=reply_token, messages=messages)
                 )
             return
         except Exception:
             logger.info("reply_token expired, falling back to push target=%s", push_target)
-        self.push(push_target, text)
+        self.push(push_target, text, quote_token=quote_token)
 
-    def push(self, target: str, text: str) -> None:
+    def push(self, target: str, text: str, quote_token: str | None = None) -> None:
         chunks = _split_text(text)[:LINE_MAX_MESSAGES_PER_CALL]
+        messages = [TextMessage(text=c) for c in chunks]
+        if quote_token:
+            messages[0].quote_token = quote_token
         with ApiClient(self._configuration) as api_client:
             MessagingApi(api_client).push_message(
-                PushMessageRequest(to=target, messages=[TextMessage(text=c) for c in chunks])
+                PushMessageRequest(to=target, messages=messages)
             )
 
     def get_display_name(self, user_id: str, group_id: str | None = None) -> str:

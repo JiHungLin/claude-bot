@@ -30,7 +30,6 @@ invoker = ClaudeInvoker(
     binary=settings.claude_binary,
     workspace_dir=settings.workspace_dir,
     timeout_seconds=settings.claude_timeout_seconds,
-    max_budget_usd=settings.claude_max_budget_usd,
 )
 
 _user_locks: dict[str, asyncio.Lock] = {}
@@ -63,16 +62,17 @@ async def webhook(request: Request) -> dict:
         source = event.source
         text = event.message.text
         reply_token = event.reply_token
+        quote_token = getattr(event.message, "quote_token", None)
 
         if isinstance(source, GroupSource):
-            _handle_group_event(source, text, reply_token)
+            _handle_group_event(source, text, reply_token, quote_token)
         elif isinstance(source, UserSource):
-            _handle_user_event(source, text, reply_token)
+            _handle_user_event(source, text, reply_token, quote_token)
 
     return {"status": "ok"}
 
 
-def _handle_group_event(source: GroupSource, text: str, reply_token: str) -> None:
+def _handle_group_event(source: GroupSource, text: str, reply_token: str, quote_token: str | None = None) -> None:
     if settings.line_group_id is None or source.group_id != settings.line_group_id:
         logger.info("[GROUP_DISCOVERED] group_id=%s", source.group_id)
         return
@@ -82,13 +82,23 @@ def _handle_group_event(source: GroupSource, text: str, reply_token: str) -> Non
     user_id = source.user_id
     command_text = text[len(settings.bot_command_prefix):].strip()
     if not command_text:
-        line_client.reply(reply_token, "請在 !bot 後面輸入問題，例如：!bot 目前有哪些 PR？")
+        line_client.reply(reply_token, "請在 !bot 後面輸入問題，例如：!bot 目前有哪些 PR？", quote_token)
+        return
+    if command_text.lower() == "status":
+        running = settings.claude_max_concurrent - _claude_semaphore._value
+        line_client.reply(
+            reply_token,
+            f"🤖 Bot 狀態\n"
+            f"執行中任務：{running} / {settings.claude_max_concurrent}\n"
+            f"單任務逾時：{settings.claude_timeout_seconds} 秒",
+            quote_token,
+        )
         return
     if command_text.startswith("/"):
-        line_client.reply(reply_token, "不支援 slash command，請直接輸入問題。")
+        line_client.reply(reply_token, "不支援 slash command，請直接輸入問題。", quote_token)
         return
     if len(command_text) > settings.max_message_length:
-        line_client.reply(reply_token, f"訊息過長（上限 {settings.max_message_length} 字），請精簡後再試。")
+        line_client.reply(reply_token, f"訊息過長（上限 {settings.max_message_length} 字），請精簡後再試。", quote_token)
         return
     line_client.reply(reply_token, "處理中...")
     session_key = f"{source.group_id}:{user_id}"
@@ -97,12 +107,13 @@ def _handle_group_event(source: GroupSource, text: str, reply_token: str) -> Non
         push_target=source.group_id,
         session_key=session_key,
         reply_token="",
+        quote_token=quote_token,
         append_system_prompt=settings.group_system_prompt,
         allowed_tools=ALLOWED_TOOLS_GROUP,
     ))
 
 
-def _handle_user_event(source: UserSource, text: str, reply_token: str) -> None:
+def _handle_user_event(source: UserSource, text: str, reply_token: str, quote_token: str | None = None) -> None:
     user_id = source.user_id
     if not is_allowed(user_id, settings.allowlist_path):
         if settings.invite_key and text.strip() == settings.invite_key:
@@ -128,6 +139,7 @@ def _handle_user_event(source: UserSource, text: str, reply_token: str) -> None:
     line_client.show_loading_animation(user_id)
     asyncio.create_task(_process_message(
         user_id, text, push_target=user_id, session_key=user_id, reply_token=reply_token,
+        quote_token=quote_token,
         append_system_prompt=settings.user_system_prompt,
     ))
 
@@ -176,6 +188,7 @@ async def _process_message(
     push_target: str,
     session_key: str,
     reply_token: str,
+    quote_token: str | None = None,
     append_system_prompt: str | None = None,
     allowed_tools: str | None = None,
 ) -> None:
@@ -209,7 +222,16 @@ async def _process_message(
             _claude_semaphore.release()
 
         session_store.set(session_key, result.session_id)
-        line_client.reply_or_push(reply_token, push_target, result.text or "(無回應內容)")
+        if result.is_error:
+            logger.warning("claude returned error session_key=%s text=%r", session_key, result.text)
+            err_lower = (result.text or "").lower()
+            if any(k in err_lower for k in ("rate limit", "quota", "usage limit", "too many")):
+                msg = "⚠️ Claude 用量已達上限，請稍後再試或等待額度重置。"
+            else:
+                msg = f"❌ {result.text or '處理時發生錯誤，請稍後再試。'}"
+            line_client.reply_or_push(reply_token, push_target, msg, quote_token=quote_token)
+        else:
+            line_client.reply_or_push(reply_token, push_target, result.text or "(無回應內容)", quote_token=quote_token)
 
 
 async def _handle_github_issue(payload: dict, action: str) -> None:

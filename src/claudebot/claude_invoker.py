@@ -54,11 +54,10 @@ class ClaudeResult:
 
 
 class ClaudeInvoker:
-    def __init__(self, binary: str, workspace_dir: str, timeout_seconds: int, max_budget_usd: float):
+    def __init__(self, binary: str, workspace_dir: str, timeout_seconds: int):
         self._binary = binary
         self._workspace_dir = workspace_dir
         self._timeout_seconds = timeout_seconds
-        self._max_budget_usd = max_budget_usd
 
     async def run(
         self,
@@ -87,7 +86,6 @@ class ClaudeInvoker:
             "--output-format", "json",
             "--tools", TOOLS,
             "--allowedTools", allowed_tools or ALLOWED_TOOLS_READONLY,
-            "--max-budget-usd", str(self._max_budget_usd),
             *session_args,
             *(["--append-system-prompt", system_prompt] if system_prompt else []),
         ]
