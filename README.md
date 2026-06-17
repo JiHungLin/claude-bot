@@ -33,4 +33,10 @@ cp allowlist.example.json allowlist.json   # 一開始留空陣列即可
 .conda/bin/python dev.py     # 啟動 FastAPI（http://0.0.0.0:8000/webhook），含 --reload
 ```
 
-LINE webhook URL 要指到 `https://<你的對外網域或 tunnel>/webhook`。
+另開一個 terminal 啟動 ngrok tunnel：
+
+```bash
+ngrok http --url=haematocryal-cora-uncarnivorously.ngrok-free.dev 8000
+```
+
+LINE webhook URL：`https://haematocryal-cora-uncarnivorously.ngrok-free.dev/webhook`
