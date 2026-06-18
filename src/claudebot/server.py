@@ -25,6 +25,15 @@ logger = logging.getLogger("claudebot.server")
 
 parser = WebhookParser(settings.line_channel_secret)
 line_client = LineClient(settings.line_channel_access_token)
+
+# 啟動時印出 bot user ID，方便設定 @mention
+try:
+    from linebot.v3.messaging import ApiClient, Configuration, MessagingApi
+    with ApiClient(Configuration(access_token=settings.line_channel_access_token)) as _api:
+        _bot_info = MessagingApi(_api).get_bot_info()
+    logger.info("[BOT_INFO] userId=%s displayName=%r", _bot_info.user_id, _bot_info.display_name)
+except Exception:
+    logger.warning("[BOT_INFO] failed to fetch bot info")
 session_store = SessionStore(settings.session_store_path)
 invoker = ClaudeInvoker(
     binary=settings.claude_binary,
@@ -64,25 +73,42 @@ async def webhook(request: Request) -> dict:
         reply_token = event.reply_token
         quote_token = getattr(event.message, "quote_token", None)
 
+        mention = getattr(event.message, "mention", None)
         if isinstance(source, GroupSource):
-            _handle_group_event(source, text, reply_token, quote_token)
+            _handle_group_event(source, text, reply_token, quote_token, mention)
         elif isinstance(source, UserSource):
             _handle_user_event(source, text, reply_token, quote_token)
 
     return {"status": "ok"}
 
 
-def _handle_group_event(source: GroupSource, text: str, reply_token: str, quote_token: str | None = None) -> None:
+def _extract_command(text: str, mention) -> str | None:
+    """Return command text with @mention removed, or None if bot not mentioned."""
+    mentionees = getattr(mention, "mentionees", None) or [] if mention else []
+    bot_mentions = [m for m in mentionees if getattr(m, "user_id", None) == settings.bot_user_id]
+    if not bot_mentions:
+        return None
+    result = text
+    for m in sorted(bot_mentions, key=lambda x: x.index, reverse=True):
+        result = result[: m.index] + result[m.index + m.length :]
+    return result.strip()
+
+
+def _handle_group_event(
+    source: GroupSource, text: str, reply_token: str,
+    quote_token: str | None = None, mention=None,
+) -> None:
     if settings.line_group_id is None or source.group_id != settings.line_group_id:
         logger.info("[GROUP_DISCOVERED] group_id=%s", source.group_id)
         return
-    if not text.startswith(settings.bot_command_prefix):
+
+    command_text = _extract_command(text, mention)
+    if command_text is None:
         return
 
     user_id = source.user_id
-    command_text = text[len(settings.bot_command_prefix):].strip()
     if not command_text:
-        line_client.reply(reply_token, "請在 !bot 後面輸入問題，例如：!bot 目前有哪些 PR？", quote_token)
+        line_client.reply(reply_token, "請 @提及我並輸入問題，例如：@ABB_Assistant 目前有哪些 PR？", quote_token)
         return
     if command_text.lower() == "status":
         running = settings.claude_max_concurrent - _claude_semaphore._value

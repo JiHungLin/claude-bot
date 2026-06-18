@@ -8,9 +8,25 @@
 
 - [docs/architecture.md](docs/architecture.md) — 完整架構、安全邊界、訊息流程、設定項
 
-## 現況
+## 使用方式
 
-核心程式骨架已完成（`src/claudebot/`），已用真實 `claude` CLI 驗證過 invoke / resume / 權限邊界。尚未做：對外曝露、長時間運行測試。
+**1:1 對話**
+直接傳訊息即可，bot 會回覆。新使用者需先傳送邀請碼加入白名單。
+
+**群組**
+@mention bot 並輸入問題，mention 可放訊息任意位置：
+
+```
+@ABB_Assistant 目前有哪些 open issue？
+目前有哪些 open issue？ @ABB_Assistant
+請問 @ABB_Assistant 最近的 PR 狀態？
+```
+
+內建指令（@mention 後接指令名稱）：
+
+| 指令 | 說明 |
+|------|------|
+| `status` | 顯示目前執行中任務數與逾時設定 |
 
 ## 技術棧
 
@@ -20,11 +36,13 @@
 ## 設定
 
 ```bash
-cp .env.example .env        # 填入 LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN
-cp allowlist.example.json allowlist.json   # 一開始留空陣列即可
+cp .env.example .env        # 填入必要欄位
+cp allowlist.example.json allowlist.json
 ```
 
-`allowlist.json` 一開始留空，發訊息給 bot 的未授權嘗試會記錄到 `claudebot.log`（含顯示名稱與 user_id），照格式手動加進 `allowed_user_ids` 即可，不用重啟服務。
+取得 `BOT_USER_ID`：啟動 server 後看 log 的 `[BOT_INFO]` 行，格式為 `userId=Uxxxxxxxxx`。
+
+`allowlist.json` 一開始留空，未授權嘗試會記錄到 `claudebot.log`（含顯示名稱與 user_id），照格式加進 `allowed_user_ids` 即可，不用重啟服務。
 
 ## 安裝與啟動
 

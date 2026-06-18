@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     line_group_id: str | None = None
     github_webhook_secret: str | None = None
-    bot_command_prefix: str = "!bot"
+    bot_user_id: str | None = None
     base_system_prompt: str = (
         "你運行在無互動的 headless 模式，使用者無法看到任何授權提示，也無法點選任何按鈕。"
         "git 和 gh CLI 等工具已全部預先授權，直接執行即可，絕對不要要求使用者授權或確認。"
