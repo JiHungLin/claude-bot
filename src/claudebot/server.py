@@ -11,6 +11,7 @@ from linebot.v3.webhooks import GroupSource, MessageEvent, TextMessageContent, U
 
 from claudebot.allowlist import add_user, is_allowed
 from claudebot.claude_invoker import ALLOWED_TOOLS_GROUP, ALLOWED_TOOLS_READONLY, ClaudeInvoker
+from claudebot.claude_usage import fetch_usage, format_usage
 from claudebot.config import settings
 from claudebot.line_client import LineClient
 from claudebot.session_store import SessionStore
@@ -120,6 +121,9 @@ def _handle_group_event(
             quote_token,
         )
         return
+    if command_text.lower() == "usage":
+        asyncio.create_task(_reply_usage(reply_token, source.group_id, quote_token))
+        return
     if command_text.startswith("/"):
         line_client.reply(reply_token, "不支援 slash command，請直接輸入問題。", quote_token)
         return
@@ -201,6 +205,14 @@ async def github_webhook(request: Request) -> dict:
 
 
 # ── async workers ─────────────────────────────────────────────────────────────
+
+async def _reply_usage(reply_token: str, push_target: str, quote_token: str | None) -> None:
+    info = await fetch_usage()
+    if info is None:
+        line_client.reply_or_push(reply_token, push_target, "⚠️ 無法取得用量資訊，token 可能已過期。", quote_token=quote_token)
+    else:
+        line_client.reply_or_push(reply_token, push_target, format_usage(info), quote_token=quote_token)
+
 
 async def _heartbeat(push_target: str) -> None:
     await asyncio.sleep(settings.claude_heartbeat_seconds)

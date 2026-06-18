@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     claude_max_concurrent: int = 3
     claude_heartbeat_seconds: int = 60
 
+    usage_cache_ttl_seconds: int = 120
+
     allowlist_path: str = "allowlist.json"
     invite_key: str | None = None
     max_message_length: int = 500
