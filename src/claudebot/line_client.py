@@ -40,10 +40,13 @@ class LineClient:
         msg = TextMessage(text=text)
         if quote_token:
             msg.quote_token = quote_token
-        with ApiClient(self._configuration) as api_client:
-            MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(reply_token=reply_token, messages=[msg])
-            )
+        try:
+            with ApiClient(self._configuration) as api_client:
+                MessagingApi(api_client).reply_message(
+                    ReplyMessageRequest(reply_token=reply_token, messages=[msg])
+                )
+        except Exception:
+            logger.error("reply failed reply_token=%s text=%r", reply_token[:8], text[:100], exc_info=True)
 
     def reply_or_push(self, reply_token: str, push_target: str, text: str, quote_token: str | None = None) -> None:
         """Try reply_token first (free); fall back to push if token expired or absent."""
@@ -69,10 +72,13 @@ class LineClient:
         messages = [TextMessage(text=c) for c in chunks]
         if quote_token:
             messages[0].quote_token = quote_token
-        with ApiClient(self._configuration) as api_client:
-            MessagingApi(api_client).push_message(
-                PushMessageRequest(to=target, messages=messages)
-            )
+        try:
+            with ApiClient(self._configuration) as api_client:
+                MessagingApi(api_client).push_message(
+                    PushMessageRequest(to=target, messages=messages)
+                )
+        except Exception:
+            logger.error("push failed target=%s text=%r", target, text[:100], exc_info=True)
 
     def get_display_name(self, user_id: str, group_id: str | None = None) -> str:
         with ApiClient(self._configuration) as api_client:
