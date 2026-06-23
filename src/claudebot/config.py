@@ -1,5 +1,22 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_MEETING_ISSUE_TEMPLATE = """\
+## 📅 會議
+
+**時間**: 2026-06-25T14:00:00+08:00
+**提醒**: 15
+**目標**: （目標說明）
+**參與者**: @user1
+
+---
+
+## 📝 會中記錄
+
+---
+
+## ✅ 結論與 Action Items\
+"""
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
@@ -14,6 +31,10 @@ class Settings(BaseSettings):
     claude_heartbeat_seconds: int = 60
 
     usage_cache_ttl_seconds: int = 120
+
+    meeting_db_path: str = "meetings.db"
+    meeting_default_repo: str = ""
+    meeting_reminder_minutes: int = 15
 
     allowlist_path: str = "allowlist.json"
     invite_key: str | None = None
@@ -56,3 +77,29 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def build_group_system_prompt() -> str:
+    base = settings.group_system_prompt
+    if not settings.meeting_default_repo:
+        return base
+
+    meeting_section = (
+        "【會議模組】"
+        "你可以協助安排、記錄、結束會議，但只能處理工作相關的會議；"
+        "非工作事項（如討論午餐）請直接拒絕。"
+        "\n時區規則：一律使用台灣時區（UTC+8）解析所有日期與時間。"
+        "例如「週四 14:00」等於台灣當地週四 14:00，對應 ISO 8601：2026-06-26T14:00:00+08:00。"
+        "\n觸發詞：安排會議/排會議 → 建立；記錄/筆記 → 新增 Comment；結束會議 → 彙整關閉；會議狀況 → 查詢。"
+        f"\n預設 repo：{settings.meeting_default_repo}（使用者明確指定時可改用 agentblackbox-core）。"
+        "\n建立會議時，gh issue create 必須加上 --label meeting/scheduled，"
+        "Issue body 嚴格使用以下格式（機器解析用，欄位順序與名稱不得更動）："
+        f"\n{_MEETING_ISSUE_TEMPLATE}"
+        "\n提醒欄位單位為分鐘，不填則使用系統預設值。"
+        "\n記錄時：找 label=meeting/in-progress 的 Issue，用 gh issue comment 新增帶時間戳的記錄。"
+        "\n結束會議時：讀取所有 comments 整理摘要，更新 Issue body 結論區塊，"
+        "為每條 Action Item 建立子 Issue（--label action-item，body 標注「來自會議 #N」），"
+        "最後 gh issue edit 將 label 改為 meeting/done，再 gh issue close 關閉。"
+        "\ngh issue edit 用於修改 label 或 body，這是允許的操作。"
+    )
+    return base + "\n\n" + meeting_section

@@ -12,8 +12,10 @@ from linebot.v3.webhooks import GroupSource, MessageEvent, TextMessageContent, U
 from claudebot.allowlist import add_user, is_allowed
 from claudebot.claude_invoker import ALLOWED_TOOLS_GROUP, ALLOWED_TOOLS_READONLY, ClaudeInvoker
 from claudebot.claude_usage import fetch_usage, format_usage
-from claudebot.config import settings
+from claudebot.config import build_group_system_prompt, settings
 from claudebot.line_client import LineClient
+from claudebot.meeting_scheduler import MeetingScheduler
+from claudebot.meeting_store import MeetingStore
 from claudebot.session_store import SessionStore
 
 logging.basicConfig(
@@ -36,6 +38,13 @@ try:
 except Exception:
     logger.warning("[BOT_INFO] failed to fetch bot info")
 session_store = SessionStore(settings.session_store_path)
+meeting_store = MeetingStore(settings.meeting_db_path)
+meeting_scheduler = MeetingScheduler(
+    store=meeting_store,
+    line_client=line_client,
+    group_id=settings.line_group_id,
+    default_reminder_minutes=settings.meeting_reminder_minutes,
+)
 invoker = ClaudeInvoker(
     binary=settings.claude_binary,
     workspace_dir=settings.workspace_dir,
@@ -46,6 +55,11 @@ _user_locks: dict[str, asyncio.Lock] = {}
 _claude_semaphore = asyncio.Semaphore(settings.claude_max_concurrent)
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    await meeting_scheduler.start()
 
 
 def _lock_for(user_id: str) -> asyncio.Lock:
@@ -138,7 +152,7 @@ def _handle_group_event(
         session_key=session_key,
         reply_token="",
         quote_token=quote_token,
-        append_system_prompt=settings.group_system_prompt,
+        append_system_prompt=build_group_system_prompt(),
         allowed_tools=ALLOWED_TOOLS_GROUP,
     ))
 
@@ -197,6 +211,23 @@ async def github_webhook(request: Request) -> dict:
 
     payload = json.loads(body_bytes.decode("utf-8"))
     action = payload.get("action", "")
+    issue = payload.get("issue", {})
+    issue_labels = [l["name"] for l in issue.get("labels", [])]
+    event_label = payload.get("label", {}).get("name", "")
+
+    is_meeting = any(l.startswith("meeting/") for l in issue_labels) or event_label.startswith("meeting/")
+
+    if is_meeting:
+        asyncio.create_task(meeting_scheduler.sync_webhook(
+            issue_number=issue.get("number", 0),
+            repo=payload.get("repository", {}).get("full_name", ""),
+            action=action,
+            labels=issue_labels,
+            body=issue.get("body", "") or "",
+            title=issue.get("title", ""),
+        ))
+        return {"status": "ok"}
+
     if action not in ("opened", "closed"):
         return {"status": "ignored"}
 

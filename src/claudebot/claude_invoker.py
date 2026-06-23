@@ -42,6 +42,7 @@ ALLOWED_TOOLS_GROUP = ",".join(
         "Bash(gh issue create:*)",
         "Bash(gh issue comment:*)",
         "Bash(gh issue close:*)",
+        "Bash(gh issue edit:*)",
     ]
 )
 

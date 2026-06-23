@@ -2,6 +2,7 @@
 allowlist.json
 sessions.json
 claudebot.log
+meetings.db
 .conda/
 __pycache__/
 *.pyc
