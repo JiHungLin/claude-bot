@@ -72,6 +72,7 @@ class LineClient:
         messages = [TextMessage(text=c) for c in chunks]
         if quote_token:
             messages[0].quote_token = quote_token
+        logger.info("push target=%s chunks=%d text=%r", target, len(chunks), text[:80])
         try:
             with ApiClient(self._configuration) as api_client:
                 MessagingApi(api_client).push_message(

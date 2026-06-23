@@ -206,11 +206,18 @@ async def github_webhook(request: Request) -> dict:
     if not hmac.compare_digest(sig_header, expected):
         raise HTTPException(status_code=400, detail="invalid signature")
 
-    if request.headers.get("X-GitHub-Event", "") != "issues":
-        return {"status": "ignored"}
-
+    event_type = request.headers.get("X-GitHub-Event", "")
     payload = json.loads(body_bytes.decode("utf-8"))
     action = payload.get("action", "")
+
+    if event_type == "discussion":
+        if action in ("created", "edited") and payload.get("discussion", {}).get("category", {}).get("is_answerable") is False:
+            asyncio.create_task(_handle_github_discussion(payload))
+        return {"status": "ok"}
+
+    if event_type != "issues":
+        return {"status": "ignored"}
+
     issue = payload.get("issue", {})
     issue_labels = [l["name"] for l in issue.get("labels", [])]
     event_label = payload.get("label", {}).get("name", "")
@@ -228,6 +235,7 @@ async def github_webhook(request: Request) -> dict:
         ))
         return {"status": "ok"}
 
+    # 普通 issue：只通知 opened/closed，且排除 meeting label（雙重保險）
     if action not in ("opened", "closed"):
         return {"status": "ignored"}
 
@@ -335,5 +343,43 @@ async def _handle_github_issue(payload: dict, action: str) -> None:
         fallback = (
             f"[GitHub] Issue #{issue.get('number')} {action_zh}\n"
             f"{issue.get('html_url', '')}"
+        )
+        line_client.push(settings.line_group_id, fallback)
+
+
+async def _handle_github_discussion(payload: dict) -> None:
+    if not settings.line_group_id:
+        logger.warning("LINE_GROUP_ID not configured, skipping discussion notification")
+        return
+
+    discussion = payload.get("discussion", {})
+    repo = payload.get("repository", {})
+    action = payload.get("action", "")
+    action_zh = "新公告" if action == "created" else "公告更新"
+
+    prompt = (
+        f"請把以下 GitHub Discussion 整理成一段簡短的中文 LINE 群組公告（不超過 250 字）。"
+        f"這是系統重大定義變更的公告，語氣正式、重點清楚。"
+        f"要包含：事件（{action_zh}）、標題、連結、以及 body 的重點摘要。\n\n"
+        f"Repo: {repo.get('full_name', '')}\n"
+        f"標題: {discussion.get('title', '')}\n"
+        f"分類: {discussion.get('category', {}).get('name', '')}\n"
+        f"作者: {discussion.get('user', {}).get('login', '')}\n"
+        f"URL: {discussion.get('html_url', '')}\n"
+        f"Body:\n{(discussion.get('body') or '（無說明）')[:1500]}"
+    )
+
+    try:
+        result = await invoker.run(
+            prompt, existing_session_id=None,
+            persist_session=False,
+            base_system_prompt=settings.base_system_prompt,
+        )
+        line_client.push(settings.line_group_id, result.text or "(無法生成公告)")
+    except Exception:
+        logger.exception("failed to handle github discussion event")
+        fallback = (
+            f"[GitHub Discussion] {action_zh}：{discussion.get('title', '')}\n"
+            f"{discussion.get('html_url', '')}"
         )
         line_client.push(settings.line_group_id, fallback)
