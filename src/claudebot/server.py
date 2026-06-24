@@ -211,8 +211,13 @@ async def github_webhook(request: Request) -> dict:
     action = payload.get("action", "")
 
     if event_type == "discussion":
-        if action in ("created", "edited") and payload.get("discussion", {}).get("category", {}).get("is_answerable") is False:
+        if action == "created" and payload.get("discussion", {}).get("category", {}).get("is_answerable") is False:
             asyncio.create_task(_handle_github_discussion(payload))
+        return {"status": "ok"}
+
+    if event_type == "pull_request":
+        if action == "opened":
+            asyncio.create_task(_handle_github_pr(payload))
         return {"status": "ok"}
 
     if event_type != "issues":
@@ -235,8 +240,7 @@ async def github_webhook(request: Request) -> dict:
         ))
         return {"status": "ok"}
 
-    # 普通 issue：只通知 opened/closed，且排除 meeting label（雙重保險）
-    if action not in ("opened", "closed"):
+    if action != "opened":
         return {"status": "ignored"}
 
     asyncio.create_task(_handle_github_issue(payload, action))
@@ -318,15 +322,13 @@ async def _handle_github_issue(payload: dict, action: str) -> None:
 
     issue = payload.get("issue", {})
     repo = payload.get("repository", {})
-    action_zh = "建立" if action == "opened" else "已關閉"
 
     prompt = (
-        f"請把以下 GitHub issue 資訊整理成一段簡短的中文 LINE 群組公告（不超過 200 字）。"
-        f"要包含：事件（{action_zh}）、issue 標題、連結、以及 body 的重點摘要（若有）。\n\n"
+        f"請把以下 GitHub Issue 資訊整理成一段簡短的中文 LINE 群組公告（不超過 200 字）。"
+        f"要包含：issue 標題、連結、以及 body 的重點摘要（若有）。\n\n"
         f"Repo: {repo.get('full_name', '')}\n"
         f"Issue #{issue.get('number', '')}: {issue.get('title', '')}\n"
         f"作者: {issue.get('user', {}).get('login', '')}\n"
-        f"狀態: {action_zh}\n"
         f"URL: {issue.get('html_url', '')}\n"
         f"Body:\n{(issue.get('body') or '（無說明）')[:1000]}"
     )
@@ -340,11 +342,44 @@ async def _handle_github_issue(payload: dict, action: str) -> None:
         line_client.push(settings.line_group_id, result.text or "(無法生成公告)")
     except Exception:
         logger.exception("failed to handle github issue event")
-        fallback = (
-            f"[GitHub] Issue #{issue.get('number')} {action_zh}\n"
-            f"{issue.get('html_url', '')}"
+        line_client.push(
+            settings.line_group_id,
+            f"[GitHub] 新 Issue #{issue.get('number')}：{issue.get('title', '')}\n{issue.get('html_url', '')}",
         )
-        line_client.push(settings.line_group_id, fallback)
+
+
+async def _handle_github_pr(payload: dict) -> None:
+    if not settings.line_group_id:
+        logger.warning("LINE_GROUP_ID not configured, skipping GitHub PR notification")
+        return
+
+    pr = payload.get("pull_request", {})
+    repo = payload.get("repository", {})
+
+    prompt = (
+        f"請把以下 GitHub PR 資訊整理成一段簡短的中文 LINE 群組公告（不超過 200 字）。"
+        f"要包含：PR 標題、來源 branch、目標 branch、連結、以及 body 的重點摘要（若有）。\n\n"
+        f"Repo: {repo.get('full_name', '')}\n"
+        f"PR #{pr.get('number', '')}: {pr.get('title', '')}\n"
+        f"作者: {pr.get('user', {}).get('login', '')}\n"
+        f"Branch: {pr.get('head', {}).get('ref', '')} → {pr.get('base', {}).get('ref', '')}\n"
+        f"URL: {pr.get('html_url', '')}\n"
+        f"Body:\n{(pr.get('body') or '（無說明）')[:1000]}"
+    )
+
+    try:
+        result = await invoker.run(
+            prompt, existing_session_id=None,
+            persist_session=False,
+            base_system_prompt=settings.base_system_prompt,
+        )
+        line_client.push(settings.line_group_id, result.text or "(無法生成公告)")
+    except Exception:
+        logger.exception("failed to handle github PR event")
+        line_client.push(
+            settings.line_group_id,
+            f"[GitHub] 新 PR #{pr.get('number')}：{pr.get('title', '')}\n{pr.get('html_url', '')}",
+        )
 
 
 async def _handle_github_discussion(payload: dict) -> None:

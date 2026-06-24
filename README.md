@@ -75,13 +75,13 @@ meeting/scheduled → meeting/in-progress → meeting/done
 cp .env.example .env          # 填入必要欄位
 cp allowlist.example.json allowlist.json
 .conda/bin/pip install -e .
-.conda/bin/python dev.py      # 啟動 FastAPI（http://0.0.0.0:8000），含 --reload
+.conda/bin/python dev.py      # 啟動 FastAPI（http://0.0.0.0:8090），含 --reload
 ```
 
 另開 terminal 啟動 tunnel：
 
 ```bash
-ngrok http --url=<your-ngrok-domain> 8000
+ngrok http --url=<your-ngrok-domain> 8090
 ```
 
 LINE webhook URL：`https://<your-ngrok-domain>/webhook`
