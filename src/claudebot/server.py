@@ -180,6 +180,18 @@ def _handle_user_event(source: UserSource, text: str, reply_token: str, quote_to
         line_client.reply(reply_token, f"訊息過長（上限 {settings.max_message_length} 字），請精簡後再試。")
         return
 
+    if text.startswith("通知群組：") or text.startswith("通知群組:"):
+        content = text.split("：", 1)[-1].split(":", 1)[-1].strip()
+        if not content:
+            line_client.reply(reply_token, "請在「通知群組：」後面輸入內容。")
+            return
+        if not settings.line_group_id:
+            line_client.reply(reply_token, "⚠️ 尚未設定群組 ID，無法推播。")
+            return
+        line_client.show_loading_animation(user_id)
+        asyncio.create_task(_relay_to_group(user_id, content, reply_token))
+        return
+
     line_client.show_loading_animation(user_id)
     asyncio.create_task(_process_message(
         user_id, text, push_target=user_id, session_key=user_id, reply_token=reply_token,
@@ -248,6 +260,34 @@ async def github_webhook(request: Request) -> dict:
 
 
 # ── async workers ─────────────────────────────────────────────────────────────
+
+async def _relay_to_group(user_id: str, content: str, reply_token: str) -> None:
+    repo_hint = (
+        f"可查詢的 repo：{settings.meeting_default_repo}（若內容未指定 repo 則優先用這個）。"
+        if settings.meeting_default_repo else ""
+    )
+    prompt = (
+        "使用者想透過 bot 發一則通知到群組。"
+        "請根據以下內容，整理成一段清楚的中文群組公告（不超過 300 字）。"
+        "若內容提到 PR 或 issue 編號，請用 gh pr view 或 gh issue view 抓取詳細資訊一併摘要。"
+        f"{repo_hint}"
+        "語氣友善、重點明確。\n\n"
+        f"內容：{content}"
+    )
+    try:
+        result = await invoker.run(
+            prompt, existing_session_id=None,
+            persist_session=False,
+            base_system_prompt=settings.base_system_prompt,
+            allowed_tools=ALLOWED_TOOLS_READONLY,
+        )
+        msg = result.text or "(無法生成公告)"
+        line_client.push(settings.line_group_id, msg)
+        line_client.reply(reply_token, f"✅ 已推播到群組。\n\n{msg}")
+    except Exception:
+        logger.exception("relay_to_group failed user_id=%s", user_id)
+        line_client.reply(reply_token, "❌ 推播失敗，請稍後再試。")
+
 
 async def _reply_usage(reply_token: str, push_target: str, quote_token: str | None) -> None:
     info = await fetch_usage()
